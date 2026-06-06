@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Pillar Tracker</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 20px;
+    line-height: 1.6;
+  }
+  .controls {
+    margin: 10px 0;
+  }
+  button, input, label {
+    margin: 4px;
+  }
+  canvas {
+    border: 1px solid #ccc;
+    max-width: 100%;
+    cursor: crosshair;
+  }
+  .status {
+    margin-top: 8px;
+    color: #333;
+  }
+</style>
+</head>
+<body>
+
+<h2>OITem Pillar Tracker</h2>
+
+<div class="controls">
+  <input type="file" id="videoInput" accept="video/*">
+  <button id="setFrameBtn">最初のフレーム表示</button>
+</div>
+
+<div class="controls">
+  <label>
+    <input type="radio" name="roiMode" value="rect" checked>
+    四角ROI
+  </label>
+
+  <label>
+    <input type="radio" name="roiMode" value="circle">
+    円ROI
+  </label>
+
+  <label>
+    FPS:
+    <input type="number" id="fpsInput" value="30" min="1" step="1" style="width:70px">
+  </label>
+
+  <label>
+    探索範囲:
+    <input type="number" id="marginInput" value="40" min="5" step="5" style="width:70px">
+    px
+  </label>
+</div>
+
+<div class="controls">
+  <button id="startBtn">トラッキング開始</button>
+  <button id="csvBtn">CSV出力</button>
+</div>
+
+<p>
+  使い方：動画を読み込み → 最初のフレーム表示 → 四角または円ROIを指定 → 必要に応じてROIを移動・サイズ変更 → トラッキング開始 → CSV出力
+</p>
+
+<p>
+  四角ROI：内側ドラッグで移動、辺・角の小さな四角をドラッグでサイズ変更。<br>
+  円ROI：円の内側ドラッグで移動、右側の小さな四角をドラッグで半径変更。
+</p>
+
+<div class="status" id="status">OpenCV.js 読み込み中...</div>
+
+<video id="video" style="display:none"></video>
+<canvas id="canvas"></canvas>
+
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+
+<script>
+const videoInput = document.getElementById("videoInput");
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+
+let roiMode = "rect";
+let roi = null;
+let template = null;
+let results = [];
+
+let isDragging = false;
+let startX = 0;
+let startY = 0;
+let currentX = 0;
+let currentY = 0;
+
+let dragMode = "new"; // new, move, resize
+let activeHandle = null;
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+let roiStart = null;
+
+const handleSize = 8;
+const hitTolerance = 10;
+
+let cvReady = false;
+
+function onOpenCvReady() {
+  cv["onRuntimeInitialized"] = () => {
+    cvReady = true;
+    statusEl.textContent = "OpenCV.js 読み込み完了";
+  };
+}
+
+document.querySelectorAll("input[name='roiMode']").forEach(el => {
+  el.onchange = () => {
+    roiMode = document.querySelector("input[name='roiMode']:checked").value;
+  };
+});
+
+videoInput.onchange = () => {
+  const file = videoInput.files[0];
+  if (!file) return;
+
+  roi = null;
+  template = null;
+  results = [];
+
+  video.src = URL.createObjectURL(file);
+  statusEl.textContent = "動画を読み込みました。最初のフレームを表示してください。";
+};
+
+document.getElementById("setFrameBtn").onclick = async () => {
+  if (!video.src) {
+    alert("先に動画を選択してください");
+    return;
+  }
+
+  await ensureMetadataLoaded();
+
+  video.currentTime = 0;
+  await waitSeek();
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  drawCurrentFrame();
+  statusEl.textContent = "ピラー頂点をROI指定してください。";
+};
+
+function drawCurrentFrame() {
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  if (roi) {
+    drawRoi(roi, "red");
+    drawRoiHandles(roi);
+  }
+}
+
+function drawRoi(targetRoi, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+
+  if (targetRoi.type === "rect") {
+    ctx.strokeRect(targetRoi.x, targetRoi.y, targetRoi.w, targetRoi.h);
+  }
+
+  if (targetRoi.type === "circle") {
+    ctx.beginPath();
+    ctx.arc(targetRoi.cx, targetRoi.cy, targetRoi.r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawRoiHandles(targetRoi) {
+  ctx.fillStyle = "white";
+  ctx.strokeStyle = "red";
+  ctx.lineWidth = 1.5;
+
+  const handles = getHandles(targetRoi);
+  for (const h of handles) {
+    ctx.fillRect(h.x - handleSize / 2, h.y - handleSize / 2, handleSize, handleSize);
+    ctx.strokeRect(h.x - handleSize / 2, h.y - handleSize / 2, handleSize, handleSize);
+  }
+}
+
+function getHandles(targetRoi) {
+  if (!targetRoi) return [];
+
+  if (targetRoi.type === "rect") {
+    const x = targetRoi.x;
+    const y = targetRoi.y;
+    const w = targetRoi.w;
+    const h = targetRoi.h;
+    return [
+      { name: "nw", x: x, y: y },
+      { name: "n",  x: x + w / 2, y: y },
+      { name: "ne", x: x + w, y: y },
+      { name: "e",  x: x + w, y: y + h / 2 },
+      { name: "se", x: x + w, y: y + h },
+      { name: "s",  x: x + w / 2, y: y + h },
+      { name: "sw", x: x, y: y + h },
+      { name: "w",  x: x, y: y + h / 2 }
+    ];
+  }
+
+  if (targetRoi.type === "circle") {
+    return [
+      { name: "radius", x: targetRoi.cx + targetRoi.r, y: targetRoi.cy },
+      { name: "center", x: targetRoi.cx, y: targetRoi.cy }
+    ];
+  }
+
+  return [];
+}
+
+function hitTestHandle(p) {
+  if (!roi) return null;
+  const handles = getHandles(roi);
+
+  for (const h of handles) {
+    if (Math.abs(p.x - h.x) <= hitTolerance && Math.abs(p.y - h.y) <= hitTolerance) {
+      return h.name;
+    }
+  }
+  return null;
+}
+
+function isInsideRoi(p) {
+  if (!roi) return false;
+
+  if (roi.type === "rect") {
+    return p.x >= roi.x && p.x <= roi.x + roi.w &&
+           p.y >= roi.y && p.y <= roi.y + roi.h;
+  }
+
+  if (roi.type === "circle") {
+    const dx = p.x - roi.cx;
+    const dy = p.y - roi.cy;
+    return Math.sqrt(dx * dx + dy * dy) <= roi.r;
+  }
+
+  return false;
+}
+
+canvas.onmousedown = e => {
+  if (!canvas.width || !canvas.height) return;
+
+  const p = getCanvasPoint(e);
+  startX = p.x;
+  startY = p.y;
+  currentX = p.x;
+  currentY = p.y;
+
+  activeHandle = hitTestHandle(p);
+
+  if (roi && activeHandle) {
+    dragMode = activeHandle === "center" ? "move" : "resize";
+    roiStart = structuredCloneRoi(roi);
+    isDragging = true;
+    canvas.style.cursor = "grabbing";
+    return;
+  }
+
+  if (roi && isInsideRoi(p)) {
+    dragMode = "move";
+    roiStart = structuredCloneRoi(roi);
+
+    if (roi.type === "rect") {
+      dragOffsetX = p.x - roi.x;
+      dragOffsetY = p.y - roi.y;
+    } else if (roi.type === "circle") {
+      dragOffsetX = p.x - roi.cx;
+      dragOffsetY = p.y - roi.cy;
+    }
+
+    isDragging = true;
+    canvas.style.cursor = "grabbing";
+    return;
+  }
+
+  dragMode = "new";
+  activeHandle = null;
+  roiStart = null;
+  isDragging = true;
+  canvas.style.cursor = "crosshair";
+};
+
+canvas.onmousemove = e => {
+  if (!canvas.width || !canvas.height) return;
+
+  const p = getCanvasPoint(e);
+  currentX = p.x;
+  currentY = p.y;
+
+  if (!isDragging) {
+    updateCursor(p);
+    return;
+  }
+
+  if (dragMode === "move") {
+    moveRoi(p);
+    drawCurrentFrame();
+    return;
+  }
+
+  if (dragMode === "resize") {
+    resizeRoi(p);
+    drawCurrentFrame();
+    return;
+  }
+
+  if (dragMode === "new") {
+    drawCurrentFrame();
+    ctx.strokeStyle = "red";
+    ctx.lineWidth = 2;
+
+    if (roiMode === "rect") {
+      ctx.strokeRect(startX, startY, currentX - startX, currentY - startY);
+    }
+
+    if (roiMode === "circle") {
+      const dx = currentX - startX;
+      const dy = currentY - startY;
+      const r = Math.sqrt(dx * dx + dy * dy);
+
+      ctx.beginPath();
+      ctx.arc(startX, startY, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+};
+
+canvas.onmouseup = () => {
+  if (!isDragging) return;
+  isDragging = false;
+  canvas.style.cursor = "crosshair";
+
+  if (dragMode === "move" || dragMode === "resize") {
+    normalizeAndClampRoi();
+    saveTemplate();
+    drawCurrentFrame();
+    statusEl.textContent = "ROIを更新しました。";
+    return;
+  }
+
+  if (dragMode === "new") {
+    if (roiMode === "rect") {
+      const x = Math.round(Math.min(startX, currentX));
+      const y = Math.round(Math.min(startY, currentY));
+      const w = Math.round(Math.abs(currentX - startX));
+      const h = Math.round(Math.abs(currentY - startY));
+
+      if (w < 3 || h < 3) {
+        alert("ROIが小さすぎます");
+        return;
+      }
+
+      roi = {
+        type: "rect",
+        x,
+        y,
+        w,
+        h
+      };
+    }
+
+    if (roiMode === "circle") {
+      const dx = currentX - startX;
+      const dy = currentY - startY;
+      const r = Math.round(Math.sqrt(dx * dx + dy * dy));
+
+      if (r < 3) {
+        alert("円ROIが小さすぎます");
+        return;
+      }
+
+      roi = {
+        type: "circle",
+        cx: Math.round(startX),
+        cy: Math.round(startY),
+        r,
+        x: Math.round(startX - r),
+        y: Math.round(startY - r),
+        w: Math.round(2 * r),
+        h: Math.round(2 * r)
+      };
+    }
+
+    normalizeAndClampRoi();
+    saveTemplate();
+    drawCurrentFrame();
+  }
+};
+
+canvas.onmouseleave = () => {
+  if (isDragging) {
+    isDragging = false;
+    normalizeAndClampRoi();
+    if (roi) {
+      saveTemplate();
+      drawCurrentFrame();
+    }
+  }
+  canvas.style.cursor = "crosshair";
+};
+
+function updateCursor(p) {
+  const h = hitTestHandle(p);
+  if (h) {
+    if (roi?.type === "circle") {
+      canvas.style.cursor = h === "center" ? "move" : "ew-resize";
+      return;
+    }
+
+    const cursors = {
+      nw: "nwse-resize",
+      se: "nwse-resize",
+      ne: "nesw-resize",
+      sw: "nesw-resize",
+      n: "ns-resize",
+      s: "ns-resize",
+      e: "ew-resize",
+      w: "ew-resize"
+    };
+    canvas.style.cursor = cursors[h] || "pointer";
+  } else if (isInsideRoi(p)) {
+    canvas.style.cursor = "move";
+  } else {
+    canvas.style.cursor = "crosshair";
+  }
+}
+
+function moveRoi(p) {
+  if (!roiStart) return;
+
+  if (roi.type === "rect") {
+    roi.x = Math.round(p.x - dragOffsetX);
+    roi.y = Math.round(p.y - dragOffsetY);
+    clampRectRoi();
+  }
+
+  if (roi.type === "circle") {
+    roi.cx = Math.round(p.x - dragOffsetX);
+    roi.cy = Math.round(p.y - dragOffsetY);
+    clampCircleRoi();
+  }
+
+  updateBoundingBoxFromCircle();
+}
+
+function resizeRoi(p) {
+  if (!roiStart || !activeHandle) return;
+
+  if (roi.type === "rect") {
+    let left = roiStart.x;
+    let top = roiStart.y;
+    let right = roiStart.x + roiStart.w;
+    let bottom = roiStart.y + roiStart.h;
+
+    if (activeHandle.includes("w")) left = p.x;
+    if (activeHandle.includes("e")) right = p.x;
+    if (activeHandle.includes("n")) top = p.y;
+    if (activeHandle.includes("s")) bottom = p.y;
+
+    const minSize = 5;
+
+    if (right - left < minSize) {
+      if (activeHandle.includes("w")) left = right - minSize;
+      else right = left + minSize;
+    }
+
+    if (bottom - top < minSize) {
+      if (activeHandle.includes("n")) top = bottom - minSize;
+      else bottom = top + minSize;
+    }
+
+    roi.x = Math.round(Math.min(left, right));
+    roi.y = Math.round(Math.min(top, bottom));
+    roi.w = Math.round(Math.abs(right - left));
+    roi.h = Math.round(Math.abs(bottom - top));
+    clampRectRoi();
+  }
+
+  if (roi.type === "circle") {
+    if (activeHandle === "radius") {
+      const dx = p.x - roi.cx;
+      const dy = p.y - roi.cy;
+      roi.r = Math.max(3, Math.round(Math.sqrt(dx * dx + dy * dy)));
+      clampCircleRoi();
+    }
+  }
+
+  updateBoundingBoxFromCircle();
+}
+
+function normalizeAndClampRoi() {
+  if (!roi) return;
+
+  if (roi.type === "rect") {
+    roi.x = Math.round(roi.x);
+    roi.y = Math.round(roi.y);
+    roi.w = Math.round(Math.max(3, roi.w));
+    roi.h = Math.round(Math.max(3, roi.h));
+    clampRectRoi();
+  }
+
+  if (roi.type === "circle") {
+    roi.cx = Math.round(roi.cx);
+    roi.cy = Math.round(roi.cy);
+    roi.r = Math.round(Math.max(3, roi.r));
+    clampCircleRoi();
+    updateBoundingBoxFromCircle();
+  }
+}
+
+function clampRectRoi() {
+  if (!roi || roi.type !== "rect") return;
+
+  roi.w = Math.min(roi.w, canvas.width);
+  roi.h = Math.min(roi.h, canvas.height);
+
+  roi.x = Math.max(0, Math.min(roi.x, canvas.width - roi.w));
+  roi.y = Math.max(0, Math.min(roi.y, canvas.height - roi.h));
+}
+
+function clampCircleRoi() {
+  if (!roi || roi.type !== "circle") return;
+
+  const maxR = Math.max(3, Math.min(canvas.width, canvas.height) / 2);
+  roi.r = Math.min(Math.max(3, roi.r), maxR);
+
+  roi.cx = Math.max(roi.r, Math.min(roi.cx, canvas.width - roi.r));
+  roi.cy = Math.max(roi.r, Math.min(roi.cy, canvas.height - roi.r));
+}
+
+function updateBoundingBoxFromCircle() {
+  if (!roi || roi.type !== "circle") return;
+
+  roi.x = Math.round(roi.cx - roi.r);
+  roi.y = Math.round(roi.cy - roi.r);
+  roi.w = Math.round(2 * roi.r);
+  roi.h = Math.round(2 * roi.r);
+}
+
+function structuredCloneRoi(target) {
+  return JSON.parse(JSON.stringify(target));
+}
+
+function getCanvasPoint(e) {
+  const r = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / r.width;
+  const scaleY = canvas.height / r.height;
+
+  return {
+    x: (e.clientX - r.left) * scaleX,
+    y: (e.clientY - r.top) * scaleY
+  };
+}
+
+function saveTemplate() {
+  if (!cvReady) {
+    alert("OpenCV.jsの読み込みがまだ完了していません");
+    return;
+  }
+
+  let src = cv.imread(canvas);
+
+  let x = Math.max(0, roi.x);
+  let y = Math.max(0, roi.y);
+  let w = Math.min(canvas.width - x, roi.w);
+  let h = Math.min(canvas.height - y, roi.h);
+
+  roi.x = x;
+  roi.y = y;
+  roi.w = w;
+  roi.h = h;
+
+  if (roi.type === "circle") {
+    roi.cx = Math.min(Math.max(roi.cx, roi.r), canvas.width - roi.r);
+    roi.cy = Math.min(Math.max(roi.cy, roi.r), canvas.height - roi.r);
+    updateBoundingBoxFromCircle();
+    x = roi.x;
+    y = roi.y;
+    w = roi.w;
+    h = roi.h;
+  }
+
+  let rect = new cv.Rect(x, y, w, h);
+  template = src.roi(rect).clone();
+
+  src.delete();
+
+  statusEl.textContent = "ROIをテンプレートとして登録しました。";
+}
+
+document.getElementById("startBtn").onclick = async () => {
+  if (!cvReady) {
+    alert("OpenCV.jsの読み込みがまだ完了していません");
+    return;
+  }
+
+  if (!template || !roi) {
+    alert("先にROIを指定してください");
+    return;
+  }
+
+  results = [];
+
+  const fps = Number(document.getElementById("fpsInput").value) || 30;
+  const dt = 1 / fps;
+  const totalFrames = Math.floor(video.duration * fps);
+
+  let lastX = roi.x;
+  let lastY = roi.y;
+  let firstX = null;
+  let firstY = null;
+
+  statusEl.textContent = "トラッキング中...";
+
+  for (let frame = 0; frame < totalFrames; frame++) {
+    video.currentTime = frame * dt;
+    await waitSeek();
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const tracked = trackFrame(lastX, lastY);
+
+    if (tracked) {
+      lastX = tracked.matchX;
+      lastY = tracked.matchY;
+
+      if (firstX === null) firstX = tracked.cx;
+      if (firstY === null) firstY = tracked.cy;
+
+      results.push({
+        frame: frame,
+        time_s: (frame * dt).toFixed(4),
+        x_px: tracked.cx.toFixed(3),
+        y_px: tracked.cy.toFixed(3),
+        dx_px: (tracked.cx - firstX).toFixed(3),
+        dy_px: (tracked.cy - firstY).toFixed(3),
+        score: tracked.score.toFixed(4),
+        area_px2: tracked.area.toFixed(1)
+      });
+
+      drawTrackingOverlay(tracked);
+    } else {
+      results.push({
+        frame: frame,
+        time_s: (frame * dt).toFixed(4),
+        x_px: "",
+        y_px: "",
+        dx_px: "",
+        dy_px: "",
+        score: "",
+        area_px2: ""
+      });
+    }
+
+    if (frame % 10 === 0) {
+      statusEl.textContent = `トラッキング中... ${frame + 1} / ${totalFrames}`;
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+  }
+
+  statusEl.textContent = `トラッキング完了：${results.length} フレーム`;
+};
+
+function trackFrame(lastX, lastY) {
+  let src = cv.imread(canvas);
+
+  const margin = Number(document.getElementById("marginInput").value) || 40;
+
+  let sx = Math.max(0, Math.round(lastX - margin));
+  let sy = Math.max(0, Math.round(lastY - margin));
+  let sw = Math.min(canvas.width - sx, roi.w + margin * 2);
+  let sh = Math.min(canvas.height - sy, roi.h + margin * 2);
+
+  if (sw <= roi.w || sh <= roi.h) {
+    src.delete();
+    return null;
+  }
+
+  let searchRect = new cv.Rect(sx, sy, sw, sh);
+  let search = src.roi(searchRect);
+
+  let result = new cv.Mat();
+  cv.matchTemplate(search, template, result, cv.TM_CCOEFF_NORMED);
+
+  let minMax = cv.minMaxLoc(result);
+  let matchX = sx + minMax.maxLoc.x;
+  let matchY = sy + minMax.maxLoc.y;
+  let score = minMax.maxVal;
+
+  let center = refineCentroid(src, matchX, matchY, roi.w, roi.h);
+
+  src.delete();
+  search.delete();
+  result.delete();
+
+  if (!center) return null;
+
+  return {
+    matchX,
+    matchY,
+    cx: center.cx,
+    cy: center.cy,
+    area: center.area,
+    score
+  };
+}
+
+function refineCentroid(src, x, y, w, h) {
+  const pad = 10;
+
+  let rx = Math.max(0, Math.round(x - pad));
+  let ry = Math.max(0, Math.round(y - pad));
+  let rw = Math.min(canvas.width - rx, Math.round(w + pad * 2));
+  let rh = Math.min(canvas.height - ry, Math.round(h + pad * 2));
+
+  if (rw <= 0 || rh <= 0) return null;
+
+  let rect = new cv.Rect(rx, ry, rw, rh);
+  let local = src.roi(rect);
+
+  let gray = new cv.Mat();
+  let blur = new cv.Mat();
+  let bin = new cv.Mat();
+
+  cv.cvtColor(local, gray, cv.COLOR_RGBA2GRAY);
+  cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+
+  // ピラー頂点が暗い場合は THRESH_BINARY_INV
+  // 明るい対象なら THRESH_BINARY に変更してください
+  cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+
+  if (roi.type === "circle") {
+    let mask = cv.Mat.zeros(bin.rows, bin.cols, cv.CV_8UC1);
+
+    let localCx = Math.round((x + roi.w / 2) - rx);
+    let localCy = Math.round((y + roi.h / 2) - ry);
+
+    cv.circle(
+      mask,
+      new cv.Point(localCx, localCy),
+      Math.round(roi.r + pad),
+      new cv.Scalar(255),
+      -1
+    );
+
+    cv.bitwise_and(bin, mask, bin);
+    mask.delete();
+  }
+
+  let contours = new cv.MatVector();
+  let hierarchy = new cv.Mat();
+
+  cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  let bestContour = null;
+  let bestArea = 0;
+
+  for (let i = 0; i < contours.size(); i++) {
+    let cnt = contours.get(i);
+    let area = cv.contourArea(cnt);
+
+    if (area > bestArea) {
+      bestArea = area;
+      bestContour = cnt;
+    }
+  }
+
+  let output = null;
+
+  if (bestContour && bestArea > 5) {
+    let M = cv.moments(bestContour);
+
+    if (M.m00 !== 0) {
+      output = {
+        cx: rx + M.m10 / M.m00,
+        cy: ry + M.m01 / M.m00,
+        area: bestArea
+      };
+    }
+  }
+
+  local.delete();
+  gray.delete();
+  blur.delete();
+  bin.delete();
+  contours.delete();
+  hierarchy.delete();
+
+  return output;
+}
+
+function drawTrackingOverlay(tracked) {
+  ctx.strokeStyle = "lime";
+  ctx.lineWidth = 2;
+
+  if (roi.type === "rect") {
+    ctx.strokeRect(tracked.matchX, tracked.matchY, roi.w, roi.h);
+  }
+
+  if (roi.type === "circle") {
+    ctx.beginPath();
+    ctx.arc(
+      tracked.matchX + roi.w / 2,
+      tracked.matchY + roi.h / 2,
+      roi.r,
+      0,
+      Math.PI * 2
+    );
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "red";
+  ctx.beginPath();
+  ctx.arc(tracked.cx, tracked.cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function ensureMetadataLoaded() {
+  return new Promise(resolve => {
+    if (video.readyState >= 1) {
+      resolve();
+    } else {
+      video.onloadedmetadata = () => resolve();
+    }
+  });
+}
+
+function waitSeek() {
+  return new Promise(resolve => {
+    video.onseeked = () => resolve();
+  });
+}
+
+document.getElementById("csvBtn").onclick = () => {
+  if (results.length === 0) {
+    alert("先にトラッキングしてください");
+    return;
+  }
+
+  const header = Object.keys(results[0]).join(",");
+  const body = results.map(row => Object.values(row).join(",")).join("\n");
+  const csv = header + "\n" + body;
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+
+  // 元動画ファイル名から拡張子を除去
+  const originalFileName = videoInput.files && videoInput.files[0]
+    ? videoInput.files[0].name.replace(/\.[^/.]+$/, "")
+    : "video";
+
+  // 現在時刻を YYYYMMDD_HHMMSS 形式に変換
+  const now = new Date();
+  const timestamp =
+    now.getFullYear().toString() +
+    String(now.getMonth() + 1).padStart(2, "0") +
+    String(now.getDate()).padStart(2, "0") +
+    "_" +
+    String(now.getHours()).padStart(2, "0") +
+    String(now.getMinutes()).padStart(2, "0") +
+    String(now.getSeconds()).padStart(2, "0");
+
+  // 例：OITem_20260607_001_tracking_20260607_235959.csv
+  a.download = `${originalFileName}_tracking_${timestamp}.csv`;
+
+  a.click();
+
+  URL.revokeObjectURL(url);
+};
+</script>
+
+</body>
+</html>
