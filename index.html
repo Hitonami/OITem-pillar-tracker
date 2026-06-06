@@ -64,7 +64,7 @@
 </div>
 
 <p>
-  使い方：動画を読み込み → 最初のフレーム表示 → 四角または円ROIを指定 → 必要に応じてROIを移動・サイズ変更 → トラッキング開始 → CSV出力
+  使い方：動画を読み込み → 最初のフレーム表示（FPS自動推定） → 四角または円ROIを指定 → 必要に応じてROIを移動・サイズ変更 → トラッキング開始 → CSV出力
 </p>
 
 <p>
@@ -141,14 +141,24 @@ document.getElementById("setFrameBtn").onclick = async () => {
 
   await ensureMetadataLoaded();
 
-  video.currentTime = 0;
-  await waitSeek();
-
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
 
+  // 可能なブラウザではFPSを自動推定
+  const estimatedFps = await estimateVideoFps(60);
+
+  if (estimatedFps) {
+    document.getElementById("fpsInput").value = estimatedFps.toFixed(2);
+    statusEl.textContent = `FPSを自動推定しました：${estimatedFps.toFixed(2)} fps`;
+  } else {
+    statusEl.textContent = "FPS自動推定に対応していないため、手入力FPSを使用します。";
+  }
+
+  video.currentTime = 0;
+  await waitSeek();
+
   drawCurrentFrame();
-  statusEl.textContent = "ピラー頂点をROI指定してください。";
+  statusEl.textContent += " ピラー頂点をROI指定してください。";
 };
 
 function drawCurrentFrame() {
@@ -822,6 +832,78 @@ function drawTrackingOverlay(tracked) {
   ctx.beginPath();
   ctx.arc(tracked.cx, tracked.cy, 4, 0, Math.PI * 2);
   ctx.fill();
+}
+
+async function estimateVideoFps(sampleFrames = 60) {
+  if (!video.requestVideoFrameCallback) {
+    console.warn("requestVideoFrameCallback is not supported.");
+    return null;
+  }
+
+  await ensureMetadataLoaded();
+
+  video.pause();
+  video.currentTime = 0;
+  await waitSeek();
+
+  const mediaTimes = [];
+
+  return new Promise(resolve => {
+    let count = 0;
+    let resolved = false;
+
+    function finish(value) {
+      if (resolved) return;
+      resolved = true;
+      video.pause();
+      resolve(value);
+    }
+
+    function callback(now, metadata) {
+      if (resolved) return;
+
+      mediaTimes.push(metadata.mediaTime);
+      count++;
+
+      if (count >= sampleFrames) {
+        const diffs = [];
+        for (let i = 1; i < mediaTimes.length; i++) {
+          const d = mediaTimes[i] - mediaTimes[i - 1];
+          if (d > 0) diffs.push(d);
+        }
+
+        if (diffs.length === 0) {
+          finish(null);
+          return;
+        }
+
+        const avgDt = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+        const fps = 1 / avgDt;
+
+        if (!Number.isFinite(fps) || fps <= 0) {
+          finish(null);
+          return;
+        }
+
+        finish(fps);
+        return;
+      }
+
+      video.requestVideoFrameCallback(callback);
+    }
+
+    // 3秒以内に推定できない場合は手入力FPSにフォールバック
+    setTimeout(() => finish(null), 3000);
+
+    video.muted = true;
+    video.play()
+      .then(() => {
+        video.requestVideoFrameCallback(callback);
+      })
+      .catch(() => {
+        finish(null);
+      });
+  });
 }
 
 function ensureMetadataLoaded() {
