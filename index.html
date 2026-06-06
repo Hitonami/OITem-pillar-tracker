@@ -69,7 +69,8 @@
 
 <p>
   四角ROI：内側ドラッグで移動、辺・角の小さな四角をドラッグでサイズ変更。<br>
-  円ROI：円の内側ドラッグで移動、右側の小さな四角をドラッグで半径変更。
+  円ROI：円の内側ドラッグで移動、右側の小さな四角をドラッグで半径変更。<br>
+  赤点は、検出されたピラー頂点輪郭の最小外接円中心を表します。
 </p>
 
 <div class="status" id="status">OpenCV.js 読み込み中...</div>
@@ -654,7 +655,8 @@ document.getElementById("startBtn").onclick = async () => {
         dx_px: (tracked.cx - firstX).toFixed(3),
         dy_px: (tracked.cy - firstY).toFixed(3),
         score: tracked.score.toFixed(4),
-        area_px2: tracked.area.toFixed(1)
+        area_px2: tracked.area.toFixed(1),
+        fitted_radius_px: tracked.radius.toFixed(3)
       });
 
       drawTrackingOverlay(tracked);
@@ -667,7 +669,8 @@ document.getElementById("startBtn").onclick = async () => {
         dx_px: "",
         dy_px: "",
         score: "",
-        area_px2: ""
+        area_px2: "",
+        fitted_radius_px: ""
       });
     }
 
@@ -720,6 +723,7 @@ function trackFrame(lastX, lastY) {
     cx: center.cx,
     cy: center.cy,
     area: center.area,
+    radius: center.radius,
     score
   };
 }
@@ -787,15 +791,15 @@ function refineCentroid(src, x, y, w, h) {
   let output = null;
 
   if (bestContour && bestArea > 5) {
-    let M = cv.moments(bestContour);
+    // ピラー頂点はほぼ円形なので、輪郭重心ではなく最小外接円の中心を使う
+    const fittedCircle = cv.minEnclosingCircle(bestContour);
 
-    if (M.m00 !== 0) {
-      output = {
-        cx: rx + M.m10 / M.m00,
-        cy: ry + M.m01 / M.m00,
-        area: bestArea
-      };
-    }
+    output = {
+      cx: rx + fittedCircle.center.x,
+      cy: ry + fittedCircle.center.y,
+      area: bestArea,
+      radius: fittedCircle.radius
+    };
   }
 
   local.delete();
@@ -828,6 +832,7 @@ function drawTrackingOverlay(tracked) {
     ctx.stroke();
   }
 
+  // 赤点：最小外接円フィッティングで得たピラー頂点中心
   ctx.fillStyle = "red";
   ctx.beginPath();
   ctx.arc(tracked.cx, tracked.cy, 4, 0, Math.PI * 2);
