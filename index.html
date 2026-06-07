@@ -87,6 +87,10 @@
     <input type="checkbox" id="recordOverlayCheckbox" checked>
     オーバーレイ動画を保存
   </label>
+  <label>
+    <input type="checkbox" id="trajectoryOverlayCheckbox" checked>
+    赤点の軌跡を表示
+  </label>
   <button id="startBtn">トラッキング開始</button>
   <button id="csvBtn">CSV出力</button>
   <button id="overlayVideoBtn">オーバーレイ動画をダウンロード</button>
@@ -100,7 +104,8 @@
   四角ROI：内側ドラッグで移動、辺・角の小さな四角をドラッグでサイズ変更。<br>
   円ROI：円の内側ドラッグで移動、右側の小さな四角をドラッグで半径変更。<br>
   手入力では、四角ROIは x, y, w, h、円ROIは cx, cy, r を入力します。<br>
-  赤点は、検出されたピラー頂点輪郭の最小外接円中心を表します。
+  赤点は、検出されたピラー頂点輪郭の最小外接円中心を表します。<br>
+  「赤点の軌跡を表示」をオンにすると、過去フレームの赤点位置を線で重ね描きします。
 </p>
 
 <div class="status" id="status">OpenCV.js 読み込み中...</div>
@@ -128,6 +133,7 @@ let results = [];
 let overlayVideoBlob = null;
 let overlayVideoFileName = "overlay_tracking.mp4";
 let overlayPreviewUrl = null;
+let trajectoryPoints = [];
 
 let isDragging = false;
 let startX = 0;
@@ -166,6 +172,7 @@ videoInput.onchange = () => {
   roi = null;
   template = null;
   results = [];
+  trajectoryPoints = [];
   overlayVideoBlob = null;
   if (overlayPreviewUrl) {
     URL.revokeObjectURL(overlayPreviewUrl);
@@ -735,7 +742,8 @@ function getTrackingMetadata() {
     threshold_method: "OTSU",
     threshold_type: "THRESH_BINARY_INV",
     center_method: "minEnclosingCircle",
-    template_method: "TM_CCOEFF_NORMED"
+    template_method: "TM_CCOEFF_NORMED",
+    trajectory_overlay: document.getElementById("trajectoryOverlayCheckbox").checked ? "on" : "off"
   };
 }
 
@@ -925,6 +933,7 @@ document.getElementById("startBtn").onclick = async () => {
   }
 
   results = [];
+  trajectoryPoints = [];
 
   const fps = Number(document.getElementById("fpsInput").value) || 30;
   const dt = 1 / fps;
@@ -1160,6 +1169,34 @@ function drawTrackingOverlay(tracked) {
       Math.PI * 2
     );
     ctx.stroke();
+  }
+
+  // 軌跡用に現在の赤点位置を保存
+  trajectoryPoints.push({ x: tracked.cx, y: tracked.cy });
+
+  // 赤点の軌跡：過去フレームの最小外接円中心を線で描画
+  if (document.getElementById("trajectoryOverlayCheckbox").checked && trajectoryPoints.length >= 2) {
+    ctx.save();
+    ctx.strokeStyle = "orange";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(trajectoryPoints[0].x, trajectoryPoints[0].y);
+
+    for (let i = 1; i < trajectoryPoints.length; i++) {
+      ctx.lineTo(trajectoryPoints[i].x, trajectoryPoints[i].y);
+    }
+
+    ctx.stroke();
+
+    // 過去位置を小さな点で表示
+    ctx.fillStyle = "orange";
+    for (let i = 0; i < trajectoryPoints.length - 1; i++) {
+      ctx.beginPath();
+      ctx.arc(trajectoryPoints[i].x, trajectoryPoints[i].y, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
   }
 
   // 赤点：最小外接円フィッティングで得たピラー頂点中心
