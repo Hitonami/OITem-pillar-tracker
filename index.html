@@ -59,12 +59,17 @@
 </div>
 
 <div class="controls">
+  <label>
+    <input type="checkbox" id="recordOverlayCheckbox" checked>
+    オーバーレイ動画を保存
+  </label>
   <button id="startBtn">トラッキング開始</button>
   <button id="csvBtn">CSV出力</button>
+  <button id="overlayVideoBtn">オーバーレイ動画をダウンロード</button>
 </div>
 
 <p>
-  使い方：動画を読み込み → 最初のフレーム表示（FPS自動推定） → 四角または円ROIを指定 → 必要に応じてROIを移動・サイズ変更 → トラッキング開始 → CSV出力
+  使い方：動画を読み込み → 最初のフレーム表示（FPS自動推定） → 四角または円ROIを指定 → 必要に応じてROIを移動・サイズ変更 → トラッキング開始 → CSV出力／MP4オーバーレイ動画出力
 </p>
 
 <p>
@@ -91,6 +96,8 @@ let roiMode = "rect";
 let roi = null;
 let template = null;
 let results = [];
+let overlayVideoBlob = null;
+let overlayVideoFileName = "overlay_tracking.webm";
 
 let isDragging = false;
 let startX = 0;
@@ -608,6 +615,104 @@ function saveTemplate() {
   statusEl.textContent = "ROIをテンプレートとして登録しました。";
 }
 
+
+function makeTimestamp() {
+  const now = new Date();
+  return (
+    now.getFullYear().toString() +
+    String(now.getMonth() + 1).padStart(2, "0") +
+    String(now.getDate()).padStart(2, "0") +
+    "_" +
+    String(now.getHours()).padStart(2, "0") +
+    String(now.getMinutes()).padStart(2, "0") +
+    String(now.getSeconds()).padStart(2, "0")
+  );
+}
+
+function getOriginalVideoBaseName() {
+  return videoInput.files && videoInput.files[0]
+    ? videoInput.files[0].name.replace(/\.[^/.]+$/, "")
+    : "video";
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function getSupportedRecorderMimeType() {
+  // MP4出力を優先します。
+  // 注意：MediaRecorderのMP4対応はブラウザ依存です。
+  const candidates = [
+    "video/mp4;codecs=avc1.42E01E",
+    "video/mp4;codecs=avc1",
+    "video/mp4"
+  ];
+
+  for (const type of candidates) {
+    if (MediaRecorder.isTypeSupported(type)) return type;
+  }
+
+  return "";
+}
+
+function prepareOverlayRecorder() {
+  if (!document.getElementById("recordOverlayCheckbox").checked) {
+    return null;
+  }
+
+  if (!window.MediaRecorder || !canvas.captureStream) {
+    alert("このブラウザはオーバーレイ動画保存に対応していません。CSV出力のみ行います。");
+    return null;
+  }
+
+  overlayVideoBlob = null;
+
+  const mimeType = getSupportedRecorderMimeType();
+  if (!mimeType) {
+    alert("このブラウザはMediaRecorderによるMP4保存に対応していません。Safariや新しいChrome/Edgeでお試しください。");
+    return null;
+  }
+
+  overlayVideoFileName = `${getOriginalVideoBaseName()}_overlay_${makeTimestamp()}.mp4`;
+
+  // 0 fpsでcaptureし、各解析フレームごとに requestFrame() で1枚ずつ記録
+  const stream = canvas.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+
+  const recorder = new MediaRecorder(stream, { mimeType });
+  const chunks = [];
+
+  recorder.ondataavailable = e => {
+    if (e.data && e.data.size > 0) chunks.push(e.data);
+  };
+
+  const requestFrame = async () => {
+    if (track && track.requestFrame) {
+      track.requestFrame();
+      await new Promise(resolve => setTimeout(resolve, 2));
+    }
+  };
+
+  const stopAndSave = () => {
+    return new Promise(resolve => {
+      recorder.onstop = () => {
+        overlayVideoBlob = new Blob(chunks, { type: mimeType });
+        resolve();
+      };
+
+      recorder.stop();
+      stream.getTracks().forEach(t => t.stop());
+    });
+  };
+
+  return { recorder, requestFrame, stopAndSave };
+}
+
 document.getElementById("startBtn").onclick = async () => {
   if (!cvReady) {
     alert("OpenCV.jsの読み込みがまだ完了していません");
@@ -623,6 +728,11 @@ document.getElementById("startBtn").onclick = async () => {
 
   const fps = Number(document.getElementById("fpsInput").value) || 30;
   const dt = 1 / fps;
+
+  const overlayRecorder = prepareOverlayRecorder();
+  if (overlayRecorder) {
+    overlayRecorder.recorder.start();
+  }
   const totalFrames = Math.floor(video.duration * fps);
 
   let lastX = roi.x;
@@ -660,6 +770,10 @@ document.getElementById("startBtn").onclick = async () => {
       });
 
       drawTrackingOverlay(tracked);
+
+      if (overlayRecorder) {
+        await overlayRecorder.requestFrame();
+      }
     } else {
       results.push({
         frame: frame,
@@ -672,6 +786,10 @@ document.getElementById("startBtn").onclick = async () => {
         area_px2: "",
         fitted_radius_px: ""
       });
+
+      if (overlayRecorder) {
+        await overlayRecorder.requestFrame();
+      }
     }
 
     if (frame % 10 === 0) {
@@ -680,7 +798,12 @@ document.getElementById("startBtn").onclick = async () => {
     }
   }
 
-  statusEl.textContent = `トラッキング完了：${results.length} フレーム`;
+  if (overlayRecorder) {
+    await overlayRecorder.stopAndSave();
+    statusEl.textContent = `トラッキング完了：${results.length} フレーム。オーバーレイ動画を作成しました。必要な時に「オーバーレイ動画をダウンロード」を押してください。`;
+  } else {
+    statusEl.textContent = `トラッキング完了：${results.length} フレーム`;
+  }
 };
 
 function trackFrame(lastX, lastY) {
@@ -927,6 +1050,15 @@ function waitSeek() {
   });
 }
 
+document.getElementById("overlayVideoBtn").onclick = () => {
+  if (!overlayVideoBlob) {
+    alert("まだオーバーレイ動画が作成されていません。先に「オーバーレイ動画を保存」をオンにしてトラッキングを実行してください。");
+    return;
+  }
+
+  downloadBlob(overlayVideoBlob, overlayVideoFileName);
+};
+
 document.getElementById("csvBtn").onclick = () => {
   if (results.length === 0) {
     alert("先にトラッキングしてください");
@@ -943,21 +1075,9 @@ document.getElementById("csvBtn").onclick = () => {
   const a = document.createElement("a");
   a.href = url;
 
-  // 元動画ファイル名から拡張子を除去
-  const originalFileName = videoInput.files && videoInput.files[0]
-    ? videoInput.files[0].name.replace(/\.[^/.]+$/, "")
-    : "video";
-
-  // 現在時刻を YYYYMMDD_HHMMSS 形式に変換
-  const now = new Date();
-  const timestamp =
-    now.getFullYear().toString() +
-    String(now.getMonth() + 1).padStart(2, "0") +
-    String(now.getDate()).padStart(2, "0") +
-    "_" +
-    String(now.getHours()).padStart(2, "0") +
-    String(now.getMinutes()).padStart(2, "0") +
-    String(now.getSeconds()).padStart(2, "0");
+  // 元動画ファイル名と現在時刻を取得
+  const originalFileName = getOriginalVideoBaseName();
+  const timestamp = makeTimestamp();
 
   // 例：OITem_20260607_001_tracking_20260607_235959.csv
   a.download = `${originalFileName}_tracking_${timestamp}.csv`;
