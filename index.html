@@ -662,8 +662,18 @@ function applyManualRoi() {
 
 function getRoiMetadata() {
   if (!roi) {
-    return { roi_type: "", roi_x: "", roi_y: "", roi_w: "", roi_h: "", roi_cx: "", roi_cy: "", roi_r: "" };
+    return {
+      roi_type: "",
+      roi_x: "",
+      roi_y: "",
+      roi_w: "",
+      roi_h: "",
+      roi_cx: "",
+      roi_cy: "",
+      roi_r: ""
+    };
   }
+
   if (roi.type === "rect") {
     return {
       roi_type: "rect",
@@ -676,15 +686,29 @@ function getRoiMetadata() {
       roi_r: ""
     };
   }
+
+  if (roi.type === "circle") {
+    return {
+      roi_type: "circle",
+      roi_x: "",
+      roi_y: "",
+      roi_w: "",
+      roi_h: "",
+      roi_cx: Math.round(roi.cx),
+      roi_cy: Math.round(roi.cy),
+      roi_r: Math.round(roi.r)
+    };
+  }
+
   return {
-    roi_type: "circle",
-    roi_x: Math.round(roi.x),
-    roi_y: Math.round(roi.y),
-    roi_w: Math.round(roi.w),
-    roi_h: Math.round(roi.h),
-    roi_cx: Math.round(roi.cx),
-    roi_cy: Math.round(roi.cy),
-    roi_r: Math.round(roi.r)
+    roi_type: "",
+    roi_x: "",
+    roi_y: "",
+    roi_w: "",
+    roi_h: "",
+    roi_cx: "",
+    roi_cy: "",
+    roi_r: ""
   };
 }
 
