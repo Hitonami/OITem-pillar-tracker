@@ -59,6 +59,30 @@
 </div>
 
 <div class="controls">
+  <strong>ROI手入力：</strong>
+  <label>形状:
+    <select id="manualRoiType">
+      <option value="rect">四角</option>
+      <option value="circle">円</option>
+    </select>
+  </label>
+  <label>x/cx:
+    <input type="number" id="manualRoiX" step="1" style="width:80px">
+  </label>
+  <label>y/cy:
+    <input type="number" id="manualRoiY" step="1" style="width:80px">
+  </label>
+  <label>w/r:
+    <input type="number" id="manualRoiW" step="1" style="width:80px">
+  </label>
+  <label>h:
+    <input type="number" id="manualRoiH" step="1" style="width:80px">
+  </label>
+  <button id="applyManualRoiBtn">ROIを手入力で設定</button>
+  <button id="copyRoiBtn">現在のROI条件をコピー</button>
+</div>
+
+<div class="controls">
   <label>
     <input type="checkbox" id="recordOverlayCheckbox" checked>
     オーバーレイ動画を保存
@@ -75,6 +99,7 @@
 <p>
   四角ROI：内側ドラッグで移動、辺・角の小さな四角をドラッグでサイズ変更。<br>
   円ROI：円の内側ドラッグで移動、右側の小さな四角をドラッグで半径変更。<br>
+  手入力では、四角ROIは x, y, w, h、円ROIは cx, cy, r を入力します。<br>
   赤点は、検出されたピラー頂点輪郭の最小外接円中心を表します。
 </p>
 
@@ -360,6 +385,7 @@ canvas.onmouseup = () => {
   if (dragMode === "move" || dragMode === "resize") {
     normalizeAndClampRoi();
     saveTemplate();
+    syncManualRoiInputs();
     drawCurrentFrame();
     statusEl.textContent = "ROIを更新しました。";
     return;
@@ -410,6 +436,7 @@ canvas.onmouseup = () => {
 
     normalizeAndClampRoi();
     saveTemplate();
+    syncManualRoiInputs();
     drawCurrentFrame();
   }
 };
@@ -420,6 +447,7 @@ canvas.onmouseleave = () => {
     normalizeAndClampRoi();
     if (roi) {
       saveTemplate();
+      syncManualRoiInputs();
       drawCurrentFrame();
     }
   }
@@ -567,6 +595,128 @@ function updateBoundingBoxFromCircle() {
 function structuredCloneRoi(target) {
   return JSON.parse(JSON.stringify(target));
 }
+
+
+function syncManualRoiInputs() {
+  if (!roi) return;
+  document.getElementById("manualRoiType").value = roi.type;
+  if (roi.type === "rect") {
+    document.getElementById("manualRoiX").value = Math.round(roi.x);
+    document.getElementById("manualRoiY").value = Math.round(roi.y);
+    document.getElementById("manualRoiW").value = Math.round(roi.w);
+    document.getElementById("manualRoiH").value = Math.round(roi.h);
+  } else {
+    document.getElementById("manualRoiX").value = Math.round(roi.cx);
+    document.getElementById("manualRoiY").value = Math.round(roi.cy);
+    document.getElementById("manualRoiW").value = Math.round(roi.r);
+    document.getElementById("manualRoiH").value = "";
+  }
+}
+
+function applyManualRoi() {
+  if (!canvas.width || !canvas.height) {
+    alert("先に動画の最初のフレームを表示してください");
+    return;
+  }
+
+  const type = document.getElementById("manualRoiType").value;
+  const a = Number(document.getElementById("manualRoiX").value);
+  const b = Number(document.getElementById("manualRoiY").value);
+  const c = Number(document.getElementById("manualRoiW").value);
+  const d = Number(document.getElementById("manualRoiH").value);
+
+  if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(c)) {
+    alert("ROIの数値を入力してください");
+    return;
+  }
+
+  if (type === "rect") {
+    if (!Number.isFinite(d) || c < 3 || d < 3) {
+      alert("四角ROIでは x, y, w, h を入力してください");
+      return;
+    }
+    roi = { type: "rect", x: Math.round(a), y: Math.round(b), w: Math.round(c), h: Math.round(d) };
+  } else {
+    if (c < 3) {
+      alert("円ROIでは cx, cy, r を入力してください");
+      return;
+    }
+    roi = {
+      type: "circle",
+      cx: Math.round(a),
+      cy: Math.round(b),
+      r: Math.round(c),
+      x: Math.round(a - c),
+      y: Math.round(b - c),
+      w: Math.round(2 * c),
+      h: Math.round(2 * c)
+    };
+  }
+
+  normalizeAndClampRoi();
+  saveTemplate();
+  syncManualRoiInputs();
+  drawCurrentFrame();
+  statusEl.textContent = "手入力ROIを設定しました。";
+}
+
+function getRoiMetadata() {
+  if (!roi) {
+    return { roi_type: "", roi_x: "", roi_y: "", roi_w: "", roi_h: "", roi_cx: "", roi_cy: "", roi_r: "" };
+  }
+  if (roi.type === "rect") {
+    return {
+      roi_type: "rect",
+      roi_x: Math.round(roi.x),
+      roi_y: Math.round(roi.y),
+      roi_w: Math.round(roi.w),
+      roi_h: Math.round(roi.h),
+      roi_cx: "",
+      roi_cy: "",
+      roi_r: ""
+    };
+  }
+  return {
+    roi_type: "circle",
+    roi_x: Math.round(roi.x),
+    roi_y: Math.round(roi.y),
+    roi_w: Math.round(roi.w),
+    roi_h: Math.round(roi.h),
+    roi_cx: Math.round(roi.cx),
+    roi_cy: Math.round(roi.cy),
+    roi_r: Math.round(roi.r)
+  };
+}
+
+function getTrackingMetadata() {
+  return {
+    video_file: videoInput.files && videoInput.files[0] ? videoInput.files[0].name : "",
+    fps_used: Number(document.getElementById("fpsInput").value) || "",
+    search_margin_px: Number(document.getElementById("marginInput").value) || "",
+    threshold_method: "OTSU",
+    threshold_type: "THRESH_BINARY_INV",
+    center_method: "minEnclosingCircle",
+    template_method: "TM_CCOEFF_NORMED"
+  };
+}
+
+function copyCurrentRoiCondition() {
+  if (!roi) {
+    alert("ROIがまだ設定されていません");
+    return;
+  }
+  const m = getRoiMetadata();
+  const text = roi.type === "rect"
+    ? `rect, x=${m.roi_x}, y=${m.roi_y}, w=${m.roi_w}, h=${m.roi_h}`
+    : `circle, cx=${m.roi_cx}, cy=${m.roi_cy}, r=${m.roi_r}`;
+  navigator.clipboard.writeText(text).then(
+    () => statusEl.textContent = `ROI条件をコピーしました：${text}`,
+    () => alert(text)
+  );
+}
+
+document.getElementById("applyManualRoiBtn").onclick = applyManualRoi;
+document.getElementById("copyRoiBtn").onclick = copyCurrentRoiCondition;
 
 function getCanvasPoint(e) {
   const r = canvas.getBoundingClientRect();
@@ -733,6 +883,9 @@ document.getElementById("startBtn").onclick = async () => {
   if (overlayRecorder) {
     overlayRecorder.recorder.start();
   }
+
+  const roiMetadata = getRoiMetadata();
+  const trackingMetadata = getTrackingMetadata();
   const totalFrames = Math.floor(video.duration * fps);
 
   let lastX = roi.x;
@@ -766,7 +919,9 @@ document.getElementById("startBtn").onclick = async () => {
         dy_px: (tracked.cy - firstY).toFixed(3),
         score: tracked.score.toFixed(4),
         area_px2: tracked.area.toFixed(1),
-        fitted_radius_px: tracked.radius.toFixed(3)
+        fitted_radius_px: tracked.radius.toFixed(3),
+        ...roiMetadata,
+        ...trackingMetadata
       });
 
       drawTrackingOverlay(tracked);
@@ -784,7 +939,9 @@ document.getElementById("startBtn").onclick = async () => {
         dy_px: "",
         score: "",
         area_px2: "",
-        fitted_radius_px: ""
+        fitted_radius_px: "",
+        ...roiMetadata,
+        ...trackingMetadata
       });
 
       if (overlayRecorder) {
@@ -1065,8 +1222,16 @@ document.getElementById("csvBtn").onclick = () => {
     return;
   }
 
-  const header = Object.keys(results[0]).join(",");
-  const body = results.map(row => Object.values(row).join(",")).join("\n");
+  const columns = Object.keys(results[0]);
+  const escapeCsv = value => {
+    const s = String(value ?? "");
+    if (s.includes(",") || s.includes("\n") || s.includes('"')) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  };
+  const header = columns.join(",");
+  const body = results.map(row => columns.map(col => escapeCsv(row[col])).join(",")).join("\n");
   const csv = header + "\n" + body;
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
