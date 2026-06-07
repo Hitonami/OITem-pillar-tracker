@@ -108,6 +108,10 @@
 <video id="video" style="display:none"></video>
 <canvas id="canvas"></canvas>
 
+<h2>Tracking Overlay Preview</h2>
+<p>トラッキング完了後、ここでオーバーレイ動画を再生・停止・シークできます。</p>
+<video id="overlayPreview" controls style="max-width:100%; border:1px solid #ccc;"></video>
+
 <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
 
 <script>
@@ -122,7 +126,8 @@ let roi = null;
 let template = null;
 let results = [];
 let overlayVideoBlob = null;
-let overlayVideoFileName = "overlay_tracking.webm";
+let overlayVideoFileName = "overlay_tracking.mp4";
+let overlayPreviewUrl = null;
 
 let isDragging = false;
 let startX = 0;
@@ -161,6 +166,16 @@ videoInput.onchange = () => {
   roi = null;
   template = null;
   results = [];
+  overlayVideoBlob = null;
+  if (overlayPreviewUrl) {
+    URL.revokeObjectURL(overlayPreviewUrl);
+    overlayPreviewUrl = null;
+  }
+  const overlayPreview = document.getElementById("overlayPreview");
+  if (overlayPreview) {
+    overlayPreview.removeAttribute("src");
+    overlayPreview.load();
+  }
 
   video.src = URL.createObjectURL(file);
   statusEl.textContent = "動画を読み込みました。最初のフレームを表示してください。";
@@ -876,6 +891,17 @@ function prepareOverlayRecorder() {
     return new Promise(resolve => {
       recorder.onstop = () => {
         overlayVideoBlob = new Blob(chunks, { type: mimeType });
+
+        if (overlayPreviewUrl) {
+          URL.revokeObjectURL(overlayPreviewUrl);
+        }
+
+        overlayPreviewUrl = URL.createObjectURL(overlayVideoBlob);
+
+        const preview = document.getElementById("overlayPreview");
+        preview.src = overlayPreviewUrl;
+        preview.load();
+
         resolve();
       };
 
@@ -981,7 +1007,7 @@ document.getElementById("startBtn").onclick = async () => {
 
   if (overlayRecorder) {
     await overlayRecorder.stopAndSave();
-    statusEl.textContent = `トラッキング完了：${results.length} フレーム。オーバーレイ動画を作成しました。必要な時に「オーバーレイ動画をダウンロード」を押してください。`;
+    statusEl.textContent = `トラッキング完了：${results.length} フレーム。オーバーレイ動画をプレビューに表示しました。必要な時に「オーバーレイ動画をダウンロード」を押してください。`;
   } else {
     statusEl.textContent = `トラッキング完了：${results.length} フレーム`;
   }
