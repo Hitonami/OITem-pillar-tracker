@@ -37,12 +37,12 @@
 
 <div class="controls">
   <label>
-    <input type="radio" name="roiMode" value="rect" checked>
+    <input type="radio" name="roiMode" value="rect">
     四角ROI
   </label>
 
   <label>
-    <input type="radio" name="roiMode" value="circle">
+    <input type="radio" name="roiMode" value="circle" checked>
     円ROI
   </label>
 
@@ -63,7 +63,7 @@
   <label>形状:
     <select id="manualRoiType">
       <option value="rect">四角</option>
-      <option value="circle">円</option>
+      <option value="circle" selected>円</option>
     </select>
   </label>
   <label>x/cx:
@@ -121,7 +121,7 @@ const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 
-let roiMode = "rect";
+let roiMode = "circle";
 let roi = null;
 let template = null;
 let results = [];
